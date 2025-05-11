@@ -1,317 +1,154 @@
-![GitHub Banner](https://github.com/langfuse/langfuse-k8s/assets/2834609/2982b65d-d0bc-4954-82ff-af8da3a4fac8)
+Here’s the revised end-to-end flow for standing up Minikube, installing Helm, installing Argo CD, deploying a Helm chart and then viewing it in Argo CD’s UI.
 
-# langfuse-k8s
+---
 
-[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/langfuse-k8s)](https://artifacthub.io/packages/search?repo=langfuse-k8s)
+## 1. Prerequisites
 
-This is a community-maintained repository that contains resources for deploying Langfuse on Kubernetes.
-Please feel free to contribute any improvements or suggestions.
+* **Homebrew** installed
 
-Langfuse self-hosting documentation: https://langfuse.com/self-hosting
+  ```bash
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  ```
+* **Docker Desktop**, or another Minikube driver (HyperKit, VirtualBox, etc.), installed and running.
+* **kubectl**, **helm** and **argocd** CLIs installed:
 
-## Repository Structure
+  ```bash
+  brew install kubectl helm argocd
+  ```
 
-- `examples` directory contains example `yaml` configurations
-- `charts/langfuse` directory contains Helm chart for deploying Langfuse with an associated database
+---
 
-## Helm Chart
-
-We provide a Helm chart that helps you deploy Langfuse on Kubernetes.
-
-### Installation
-
-Configure the required secrets and parameters as defined below in a new `values.yaml` file.
-Then install the helm chart using the commands below:
+## 2. Start Minikube
 
 ```bash
-helm repo add langfuse https://langfuse.github.io/langfuse-k8s
-helm repo update
-helm install langfuse langfuse/langfuse -f values.yaml
+minikube start --driver=docker
+kubectl get nodes   # confirm your node is Ready
 ```
 
-### Upgrading
+---
+
+## 3. Install Argo CD into your cluster
+
+1. **Create the namespace**
+
+   ```bash
+   kubectl create namespace argocd
+   ```
+
+2. **Apply the Argo CD manifests**
+
+   ```bash
+   kubectl apply -n argocd \
+     -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+   ```
+
+3. **Expose the API server**
+   For quick local access, port-forward:
+
+   ```bash
+   kubectl port-forward svc/argocd-server -n argocd 8080:443
+   ```
+
+   Now Argo CD’s UI is at [https://localhost:8080](https://localhost:8080)
+
+4. **Log in to Argo CD**
+
+   * The initial admin password is the name of the server pod:
+
+     ```bash
+     argocd login localhost:8080 \
+       --username admin \
+       --password $(kubectl get pods -n argocd -l app.kubernetes.io/name=argocd-server \
+         -o name | cut -d/ -f2)
+     ```
+   * (You’ll be prompted to accept a self-signed cert.)
+
+5. **Change your admin password** (strongly recommended)
+
+   ```bash
+   argocd account update-password
+   ```
+
+---
+
+## 4. Add & Update Helm Repos in Argo CD
+
+Argo CD can pull directly from any Helm chart repo:
 
 ```bash
-helm repo update
-helm upgrade langfuse langfuse/langfuse
+argocd repo add https://charts.helm.sh/stable \
+  --name stable \
+  --type helm
 ```
 
-Please validate whether the helm sub-charts in the Chart.yaml were updated between versions.
-If yes, follow the guide for the respective sub-chart to upgrade it.
+You only need to do this once per repo.
 
-### Configuration
+---
 
-The required configuration options to set are:
+## 5. Deploy a Helm Chart via Argo CD
 
-```yaml
-# Optional, but highly recommended. Generate via `openssl rand -hex 32`.
-#  langfuse:
-#    encryptionKey:
-#      value: ""
-langfuse: 
-  salt:
-    value: secureSalt
-  nextauth:
-    secret:
-      value: ""
+Let’s deploy the `nginx-ingress` chart into its own namespace:
 
-postgresql:
-  auth:
-    # If you want to use `postgres` as the username, you need to provide postgresPassword instead of password.
-    username: langfuse
-    password: ""
+1. **Create the target namespace**
 
-clickhouse:
-  auth:
-    password: ""
+   ```bash
+   kubectl create namespace ingress-nginx
+   ```
 
-redis:
-  auth:
-    password: ""
+2. **Register the Application in Argo CD**
 
-s3:
-  auth:
-    rootPassword: ""
+   ```bash
+   argocd app create nginx-ingress \
+     --repo https://charts.helm.sh/stable \
+     --helm-chart nginx-ingress \
+     --revision 1.41.3 \
+     --dest-server https://kubernetes.default.svc \
+     --dest-namespace ingress-nginx \
+     --helm-set controller.publishService.enabled=true
+   ```
+
+3. **Sync (deploy) it**
+
+   ```bash
+   argocd app sync nginx-ingress
+   ```
+
+4. **Check status**
+
+   ```bash
+   argocd app get nginx-ingress
+   ```
+
+   You should see `Health: Healthy` and `Status: Synced`.
+
+---
+
+## 6. View & Manage in the UI
+
+* Visit **[https://localhost:8080](https://localhost:8080)**
+* Log in with the credentials you set.
+* You’ll see your `nginx-ingress` application in the dashboard.
+* Click in to view resources, logs, diff against the Helm chart, and manually trigger syncs or rollbacks.
+
+---
+
+## 7. Clean-up
+
+When you’re done:
+
+```bash
+argocd app delete nginx-ingress
+kubectl delete namespace ingress-nginx
+kubectl delete namespace argocd
+minikube delete
 ```
 
-They can alternatively set via secret references (the secrets must exist):
+---
 
-```yaml
-# Optional, but highly recommended. Generate via `openssl rand -hex 32`.
-#  langfuse:
-#    encryptionKey:
-#      secretKeyRef:
-#        name: langfuse-encryption-key-secret
-#        key: encryptionKey
-langfuse: 
-  salt:
-    secretKeyRef:
-      name: langfuse-general
-      key: salt
-  nextauth:
-    secret:
-      secretKeyRef:
-        name: langfuse-nextauth-secret
-        key: nextauth-secret
+You now have a full local workflow:
 
-postgresql:
-  auth:
-    # If you want to use `postgres` as the username, you need to provide a adminPasswordKey in secretKeys.
-    username: langfuse
-    existingSecret: langfuse-postgresql-auth
-    secretKeys:
-      userPasswordKey: password
+1. Minikube cluster
+2. Helm CLI for chart management
+3. Argo CD for GitOps-style visibility and control of your Helm releases.
 
-clickhouse:
-  auth:
-    existingSecret: langfuse-clickhouse-auth
-    existingSecretKey: password
-
-redis:
-  auth:
-    existingSecret: langfuse-redis-auth
-    existingSecretPasswordKey: password
-
-s3:
-  auth:
-    # If existingSecret is set, both root user and root password must be supplied via the secret
-    existingSecret: langfuse-s3-auth
-    rootUserSecretKey: rootUser
-    rootPasswordSecretKey: rootPassword
-```
-      
-See the [Helm README](./charts/langfuse/README.md) for a full list of all configuration options.
-
-#### Examples:
-
-##### With an external Postgres server
-
-```yaml
-[...]
-postgresql:
-  deploy: false
-  auth:
-    username: my-username
-    password: my-password
-    database: my-database
-  host: my-external-postgres-server.com
-  directUrl: postgres://my-username:my-password@my-external-postgres-server.com
-  shadowDatabaseUrl: postgres://my-username:my-password@my-external-postgres-server.com
-```
-
-#### With an external S3 bucket
-
-```yaml
-[...]
-s3:
-  deploy: false
-  bucket: "langfuse-bucket"
-  region: "eu-west-1"
-  endpoint: "https://s3.eu-west-1.amazonaws.com"
-  forcePathStyle: false
-  accessKeyId:
-    value: "mykey"
-  secretAccessKey:
-    value: "mysecret"
-  eventUpload:
-    prefix: "events/"
-  batchExport:
-    prefix: "exports/"
-  mediaUpload:
-    prefix: "media/"
-```
-
-#### Use custom deployment strategy
-
-```yaml
-[...]
-langfuse:
-  deployment:
-    strategy:
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 50%
-        maxUnavailable: 50%
-```
-
-##### Enable ingress
-
-```yaml
-[...]
-langfuse:
-  ingress:
-    enabled: true
-    hosts:
-    - host: langfuse.your-host.com
-      paths:
-      - path: /
-        pathType: Prefix
-    annotations: []
-```
-
-#### Custom Storage Class Definition
-
-The Langfuse chart supports configuring storage classes for all persistent volumes in the deployment. You can configure storage classes in two ways:
-
-1. **Global Storage Class**: Set a global storage class that will be used for all persistent volumes unless overridden.
-```yaml
-global:
-  defaultStorageClass: "your-storage-class"
-```
-
-2. **Component-specific Storage Classes**: Override the storage class for specific components.
-```yaml
-postgresql:
-  primary:
-    persistence:
-      storageClass: "postgres-storage-class"
-   
-redis:
-  primary:
-    persistence:
-      storageClass: "redis-storage-class"
-
-clickhouse:
-  persistence:
-    storageClass: "clickhouse-storage-class"
-
-s3:
-  persistence:
-    storageClass: "minio-storage-class"
-```
-
-If no storage class is specified, the cluster's default storage class will be used.
-
-##### With an external Postgres server with client certificates using own secrets and additionalEnv for mappings
-
-```yaml
-langfuse:
-  salt: null
-  nextauth: 
-    secret: null
-  extraVolumes:
-    - name: db-keystore   # referencing an existing secret to mount server/client certs for postgres
-      secret:
-        secretName: langfuse-postgres  # contain the following files (server-ca.pem, sslidentity.pk12)
-  extraVolumeMounts:
-    - name: db-keystore
-      mountPath: /secrets/db-keystore  # mounting the db-keystore store certs in the pod under the given path
-      readOnly: true
-  additionalEnv:
-    - name: DATABASE_URL  # Using the certs in the url eg. postgresql://the-db-user:the-password@postgres-host:5432/langfuse?ssl=true&sslmode=require&sslcert=/secrets/db-keystore/server-ca.pem&sslidentity=/secrets/db-keystore/sslidentity.pk12&sslpassword=the-ssl-identity-pw
-      valueFrom:
-        secretKeyRef:
-          name: langfuse-postgres  # referencing an existing secret
-          key: database-url
-    - name: NEXTAUTH_SECRET
-      valueFrom:
-        secretKeyRef:
-          name: langfuse-general # referencing an existing secret
-          key: nextauth-secret
-    - name: SALT
-      valueFrom:
-        secretKeyRef:
-          name: langfuse-general
-          key: salt
-service:
-  [...]
-ingress:
-  [...]
-postgresql:
-  deploy: false
-  auth:
-    password: null
-    username: null
-```
-
-##### With overrides for hostAliases
-
-This is going to add a record to the /etc/hosts file of all containers
-under the langfuse-web pod in such a way that every traffic towards "oauth.id.jumpcloud.com" is going to be forwarded to the localhost network.
-
-```yaml
-langfuse:
-  web:
-    hostAliases:
-      - ip: 127.0.0.1
-        hostnames:
-          - "oauth.id.jumpcloud.com"
-```
-
-##### With topology spread constraints
-
-Distribute pods evenly across different zones to improve high availability:
-
-```yaml
-langfuse:
-  # Global topology spread constraints applied to all langfuse pods
-  pod:
-    topologySpreadConstraints:
-      - maxSkew: 1
-        topologyKey: topology.kubernetes.io/zone
-        whenUnsatisfiable: ScheduleAnyway
-        labelSelector:
-          matchLabels:
-            app.kubernetes.io/instance: langfuse
-  
-  # Component-specific topology spread constraints
-  web:
-    pod:
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: DoNotSchedule
-          labelSelector:
-            matchLabels:
-              app: web
-  
-  worker:
-    pod:
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: DoNotSchedule
-          labelSelector:
-            matchLabels:
-              app: worker
-```
+Let me know if you’d like any deeper dive—e.g. automated GitHub → Argo CD pipelines, SSO, or advanced chart value overrides!
